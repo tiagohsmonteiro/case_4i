@@ -1,0 +1,424 @@
+---
+title: "Case Técnico - 4intelligence"
+author: "Tiago Monteiro"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message=FALSE)
+```
+
+```{r, include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(GGally)
+library(patchwork)
+library(tseries)
+library(forecast)
+library(fpp3)
+library(knitr)
+```
+
+# Introdução
+
+|   Este documento tem o intuito de estudar, modelar e predizer os valores do índice ABCR para veículos leves dos próximos anos, que mede o fluxo de carros nas rodovias e estradas com base na quantidade de veículos que passam por praças de pedágios no Brasil. Para tal, foram utilizadas 16 outras variáveis, além de técnicas e modelos de séries temporais, visando compará-los e decidir qual é o mais adequado para o problema.
+
+# Análise Exploratória
+
+|   A Figura 1 mostra a tendência mensal do índice ABCR para veículos leves desde janeiro de 2010 até junho de 2023. Pelo gráfico, observa-se uma significativa sazonalidade anual, não se alterando muito ao longo dos anos. Observa-se também um crescimento em sua tendência, que pode ser melhor observada pela linha vermelha, representando as médias móveis anuais, até 2015, seguida de uma certa estabilidade, até 2020, quando houve uma rápida queda e quebra do padrão anterior, provavelmente causada pela pandemia de COVID-19, quando o fluxo de pessoas, e consequentemente de carros, diminuiu drasticamente.
+
+```{r fig_1, fig.cap="Tendência do índice ABCR (veículos leves) nos últimos anos", fig.dim=c(5,3), fig.pos="H"}
+dados <- readxl::read_excel("dataset_processo_seletivo.xlsx") 
+
+dados %>% 
+  mutate(data = yearmonth(data)) %>% 
+  as_tsibble(index = data) %>%  
+  filter(!is.na(abcr_leves)) %>% 
+  mutate(`13-MM` = slider::slide_dbl(abcr_leves, mean, .before = 6, 
+                                    .after = 6, .complete = TRUE)) %>%  
+  autoplot(abcr_leves) + 
+  geom_line(aes(y = `13-MM`), colour = "red") +
+  labs(x = "Data", y = "ABCR") + 
+  theme_classic()
+```
+
+
+|   A Figura 2 mostra as funções de autocorrelação e autocorrelação parcial da série, deixando ainda mais claro os fortes padrões sazonais, mais precisamente, a cada 12 lags, ou seja, as observações tem o comportamento influenciado por suas observações referentes ao ano anterior.
+
+```{r fig_2, fig.cap="ACF e PACF de ABCR", fig.dim=c(5,3), fig.pos="H"}
+op = par(mfrow = c(1,2))
+acf(dados$abcr_leves, na.action = na.pass, lag = 5*12, main = "")
+pacf(dados$abcr_leves, na.action = na.pass, lag = 5*12, main = "")
+par(op)
+```
+
+\newpage
+|   A Figura 3 nos confirma o que foi visto nas análises anteriores, decompondo a série em suas componentes de tendência, sazonal e a parte aleatória, usando Loess, um método para estimar relações não lineares. Como dito anteriormente, vemos uma tendência de crescimento, com uma ruptura do padrão em 2020, e uma sazonalidade bem definida.
+
+```{r fig_3, fig.cap="Decomposição STL de ABCR", fig.dim=c(5,3), fig.pos="H"}
+dados %>% 
+  filter(!is.na(abcr_leves)) %>% 
+  mutate(data = yearmonth(data)) %>% 
+  as_tsibble(index = data) %>% 
+  model(STL(abcr_leves ~ trend() + season(window = "periodic"), 
+            robust = TRUE))%>%
+  components() %>% 
+  autoplot()
+```
+
+\newpage
+|   Com o intuito de construir um modelo mais simples possível, a Figura 4, apesar de poluída pelo número de linhas, nos ajuda a entender como as variáveis interagem entre si pelas suas correlações, que são mais significativas a medida que a cor do quadrado de intersecção está mais próxima do vermelho (correlação positiva) ou do azul (correlação negativa). Observando a primeira linha de baixo, vemos que as variáveis que possuem maiores correlações com o índice ABCR são: `pmc_alimentos_bebidas`, `pmc-roupas_calcados`, `pmc_moveis_linha_branca`, `receita`, `reservas_internacionais` e `pmc_combustiveis_lubrificantes`, nesta ordem.
+
+```{r fig_4, fig.cap="Matriz de correlação (todas as variáveis)", fig.dim=c(5,3), fig.pos="H"}
+dados %>% 
+  ggcorr(low = "blue", high = "red", geom = "tile", label = TRUE, 
+                 label_alpha = .5, label_size = 2, label_round = 2)
+```
+
+|   A Figura 5, assim como a Figura 4, mostra a matriz de correlação, porém restrita apenas às variáveis mais relevantes para o índice ABCR, além de mostrar gráficos de dispersão, densidades e os coeficiente de correlação de cada par de variável. Observa-se que as variáveis mais correlacionadas entre si são `receita` e `pmc_alimentos_bebidas`, com 0,81 de correlação, grande mas não a ponto de indicar uma possível multicolinearidade. Vemos também que algumas indicam uma possível relação não-linear em relação a ABCR, como `receita`, `pmc_combustiveis_lubrificantes`, `pmc_roupa_calcados` e `pmc_alimentos_bebidas`.
+
+```{r fig_5, fig.cap="Matriz de correlação (variáveis mais relevantes)", fig.dim=c(5,3), fig.pos="H"}
+dados %>% 
+  select(abcr_leves, receita, reservas_internacionais, pmc_moveis_linha_branca,
+         pmc_combustiveis_lubrificantes, pmc_roupa_calcados,
+         pmc_alimentos_bebidas) %>% 
+  ggpairs(progress = FALSE, 
+          lower = list(continuous = wrap("smooth", alpha = 0.3, color = "blue", 
+                                         method = "loess")),
+          upper = list(continuous = wrap("cor", size = 3))) +
+  scale_y_continuous(n.breaks = 3) + 
+  scale_x_continuous(n.breaks = 3) 
+```
+
+\newpage
+|   A Figura 6 mostra os gráficos de tendência temporal das variáveis vistas no gráfico anterior, comparadas ao índice ABCR para veículos leves. Em todas, com exceção de `reservas_internacionais`, percebe-se uma sazonalidade anual, e com uma quebra na tendência por volta de 2020, com exceção de `pmc_alimentos_bebidas`, que se manteve estável.
+
+```{r fig_6, fig.cap="Tendências das variáveis comparadas ao índice ABCR", fig.dim=c(5,3), fig.pos="H"}
+f1 <- dados %>% filter(!is.na(abcr_leves)) %>% 
+  pivot_longer(c(abcr_leves, receita, reservas_internacionais,
+                 pmc_moveis_linha_branca)) %>% 
+  ggplot(aes(x = data, y = value)) +
+  geom_line() +
+  facet_grid(name ~ ., scale = "free_y") +
+  ylab("") + xlab("Data")  + theme_classic()
+
+f2 <- dados %>% filter(!is.na(abcr_leves)) %>% 
+  pivot_longer(c(abcr_leves, pmc_combustiveis_lubrificantes, pmc_roupa_calcados,
+                 pmc_alimentos_bebidas)) %>% 
+  ggplot(aes(x = data, y = value)) +
+  geom_line() +
+  facet_grid(name ~ ., scale = "free_y") +
+  ylab("") + xlab("Data") + theme_classic()
+
+f1 + f2
+```
+
+\newpage
+# Resultados
+
+
+|   Agora ajustaremos vários modelos com o intuito de escolher aquele com uma acurácia maior e, de preferência, que seja o mais simples possível, mantendo o padrão de qualidade. Como pudemos ver que o índice ABCR possui padrão sazonal, vamos ajustar um SARIMAX, que corresponde a um modelo de regressão com erros SARIMA (\textit{Seasonal AutoRegressive Integrated Moving Average}). 
+
+|   Abaixo podemos ver os resultados de um ajuste com todas as 6 variáveis mais relevantes para a variável de interesse. Na Tabela 1 podemos ver os valores estimados das variáveis e dos parâmetros dos erros SARIMA(0,1,1)(0,1,1)[12], além de seus erros padrão, estatística t e o respectivo p-valor do Teste t, que verifica a significância do parâmetro a partir das hipóteses: $H_0$: o parâmetro é igual a 0 $vs. H_1$: o parâmetro é diferente de 0. Usando um nível de signficância de $5\%$, rejeitamos $H_0$ quando o p-valor for menor que 0,05. Na tabela podemos ver que, dado que todas as outras variáveis estão no modelo, não rejeitamos a hipótese de que `receita` e `pmc_moveis_linha_branca` são iguais a 0, ou seja, não são significativos para o modelo. Além disso, foi calculado o AIC (\textit{Akaike Information Criterion}), que é uma medida de quão bom é o ajuste do modelo, levando em consideração sua complexidade, penalizando aqueles que possuem mais parâmetros, sendo preferível ajustes com menor AIC quando comparado com outros modelos.
+
+```{r, include=FALSE}
+dados$data <- yearmonth(dados$data)
+dados <- tsibble::as_tsibble(dados)
+dados_sem_na <- dados[!is.na(dados$abcr_leves),]
+
+lm_01 <- lm(abcr_leves ~ pmc_alimentos_bebidas + pmc_roupa_calcados +
+                pmc_moveis_linha_branca + receita + reservas_internacionais +
+                pmc_combustiveis_lubrificantes, dados_sem_na)
+
+ts.plot(lm_01$residuals %>% diff() %>% diff(12))
+```
+
+```{r, include=FALSE}
+par(mfrow = c(1,2))
+acf(lm_01$residuals %>% diff() %>% diff(12), 5*12)
+pacf(lm_01$residuals %>% diff() %>% diff(12), 5*12)
+```
+
+```{r tab_1}
+fit_sarimax01 <- dados_sem_na %>% 
+  model(ARIMA(abcr_leves ~ pmc_alimentos_bebidas + pmc_roupa_calcados +
+                pmc_moveis_linha_branca + receita + reservas_internacionais +
+                pmc_combustiveis_lubrificantes +
+                pdq(0,1,1) + PDQ(0,1,1)))
+
+fit_sarimax01[[1]][[1]][["fit"]][["par"]] %>% 
+  kable(caption = paste0("Coeficientes SARIMAX 1 (AIC = ", 
+                   round(fit_sarimax01[[1]][[1]][["fit"]][["model"]][["aic"]],2),
+                   ")"),
+        digits = 4)
+```
+
+```{r, include=FALSE}
+lm_02 <- lm(abcr_leves ~ pmc_alimentos_bebidas + pmc_roupa_calcados +
+              reservas_internacionais + pmc_combustiveis_lubrificantes,
+            dados_sem_na)
+
+ts.plot(lm_02$residuals %>% diff() %>% diff(12))
+```
+
+```{r, include=FALSE}
+par(mfrow = c(1,2))
+acf(lm_02$residuals %>% diff() %>% diff(12), 5*12)
+pacf(lm_02$residuals %>% diff() %>% diff(12), 5*12)
+```
+
+|   Na Tabela 2 foi ajustado um modelo sem as 2 variáveis que não mostraram significância no ajuste anterior, e com os erros SARIMA(0,1,1)(1,1,3)[12]. Neste modelo vemos que `pmc_alimentos_bebidas` e `reservas_internacionais` também não se mostraram ter significância dado que as outras variáveis estão no modelo. O AIC do ajuste abaixo foi pouco maior do que o modelo anterior, indicando que este está levemente menos ajustado aos dados que o anterior.
+
+```{r tab_2}
+fit_sarimax02 <- dados_sem_na %>% 
+  model(ARIMA(abcr_leves ~ pmc_alimentos_bebidas + pmc_roupa_calcados +
+                reservas_internacionais + pmc_combustiveis_lubrificantes + 
+                pdq(0,1,1) + PDQ(1,1,3)))
+
+fit_sarimax02[[1]][[1]][["fit"]][["par"]] %>% 
+  kable(caption = paste0("Coeficientes SARIMAX 2 (AIC = ", 
+                   round(fit_sarimax02[[1]][[1]][["fit"]][["model"]][["aic"]],2),
+                   ")"),
+        digits = 4)
+```
+
+```{r, include=FALSE}
+lm_03 <- lm(abcr_leves ~ pmc_roupa_calcados + pmc_combustiveis_lubrificantes, 
+            dados_sem_na)
+
+ts.plot(lm_03$residuals %>% diff() %>% diff(12))
+```
+
+```{r, include=FALSE}
+par(mfrow = c(1,2))
+acf(lm_03$residuals %>% diff() %>% diff(12), 5*12)
+pacf(lm_03$residuals %>% diff() %>% diff(12), 5*12)
+```
+
+|   Na Tabela 3 foi ajustado um SARIMAX novamente sem as 2 variáveis que não se mostraram significativas no modelo anterior, com erros SARIMA(0,1,1)(1,1,3)[12], e como podemos ver abaixo, todas as variáveis desde modelo se mostraram significativas, porém, com um ajuste pior do que os modelos anteriores, pois o AIC foi superior.
+
+```{r tab_3}
+fit_sarimax03 <- dados_sem_na %>% 
+  model(ARIMA(abcr_leves ~ pmc_roupa_calcados + pmc_combustiveis_lubrificantes +
+                pdq(0,1,1) + PDQ(1,1,3)))
+
+fit_sarimax03[[1]][[1]][["fit"]][["par"]] %>% 
+  kable(caption = paste0("Coeficientes SARIMAX 3 (AIC = ", 
+                   round(fit_sarimax03[[1]][[1]][["fit"]][["model"]][["aic"]],2),
+                   ")"),
+        digits = 4)
+```
+
+```{r, include=FALSE}
+lm_04 <- lm(abcr_leves ~ log(pmc_roupa_calcados) + pmc_combustiveis_lubrificantes,
+            dados_sem_na)
+
+ts.plot(lm_04$residuals %>% diff() %>% diff(12))
+```
+
+```{r, include=FALSE}
+par(mfrow = c(1,2))
+acf(lm_04$residuals %>% diff() %>% diff(12), 5*12)
+pacf(lm_04$residuals %>% diff() %>% diff(12), 5*12)
+```
+
+|   Como visto na Figura 5, algumas variáveis apresentam uma possível relação não linear em relação ao índice ABCR. Aplicando o logarítimo em `pmc_roupa_calcados`, geramos o modelo com coeficientes observados na Tabela 4, com erros SARIMA(0,1,1)(0,1,1)[12]. Vemos que o modelo possui todas as variáveis significativas, e ainda reduziu o AIC em relação aos modelos anteriores.
+
+
+```{r tab_4}
+fit_sarimax04 <- dados_sem_na %>% 
+  model(ARIMA(abcr_leves ~ log(pmc_roupa_calcados) + pmc_combustiveis_lubrificantes+
+                pdq(0,1,1) + PDQ(0,1,1)))
+
+fit_sarimax04[[1]][[1]][["fit"]][["par"]] %>% 
+  kable(caption = paste0("Coeficientes SARIMAX 4 (AIC = ", 
+                   round(fit_sarimax04[[1]][[1]][["fit"]][["model"]][["aic"]],2),
+                   ")"),
+        digits = 4)
+```
+
+```{r, include=FALSE}
+lm_05 <- lm(abcr_leves ~ log(pmc_roupa_calcados) + pmc_combustiveis_lubrificantes +
+              log(reservas_internacionais), dados_sem_na)
+
+ts.plot(lm_05$residuals %>% diff() %>% diff(12))
+```
+
+```{r, include=FALSE}
+par(mfrow = c(1,2))
+acf(lm_05$residuals %>% diff() %>% diff(12), 5*12)
+pacf(lm_05$residuals %>% diff() %>% diff(12), 5*12)
+```
+
+|   A Tabela 5 acresce ao último ajuste, com mesmos erros SARIMA, a variável `reservas_internacionais`, e diminui o AIC em relação ao modelo sem a variável.
+
+```{r tab_5}
+fit_sarimax05 <- dados_sem_na %>% 
+  model(ARIMA(abcr_leves ~ log(pmc_roupa_calcados) +
+                pmc_combustiveis_lubrificantes + log(reservas_internacionais) + 
+                pdq(0,1,1) + PDQ(0,1,1)))
+
+fit_sarimax05[[1]][[1]][["fit"]][["par"]] %>% 
+  kable(caption = paste0("Coeficientes SARIMAX 5 (AIC = ", 
+                   round(fit_sarimax05[[1]][[1]][["fit"]][["model"]][["aic"]],2),
+                   ")"),
+        digits = 4)
+```
+
+```{r, include=FALSE}
+lm_06 <- lm(abcr_leves ~ log(pmc_roupa_calcados) + 
+              log(pmc_combustiveis_lubrificantes), dados_sem_na)
+
+ts.plot(lm_06$residuals %>% diff() %>% diff(12))
+```
+
+```{r, include=FALSE}
+par(mfrow = c(1,2))
+acf(lm_06$residuals %>% diff() %>% diff(12), 5*12)
+pacf(lm_06$residuals %>% diff() %>% diff(12), 5*12)
+```
+
+|   A Tabela 6 remove a variável `log(reservas_internacionais)` e aplica log em `pmc_combustiveis_lubrificantes`, com mesmos erros SARIMA, resultando em um AIC pouco maior que o anterior, mas com todas as variáveis sendo significativas.
+
+```{r tab_6}
+fit_sarimax06 <- dados_sem_na %>% 
+  model(ARIMA(abcr_leves ~ log(pmc_roupa_calcados) + 
+                log(pmc_combustiveis_lubrificantes) + pdq(0,1,1) + PDQ(0,1,1)))
+
+fit_sarimax06[[1]][[1]][["fit"]][["par"]] %>% 
+  kable(caption = paste0("Coeficientes SARIMAX 6 (AIC = ", 
+                   round(fit_sarimax06[[1]][[1]][["fit"]][["model"]][["aic"]],2),
+                   ")"),
+        digits = 4)
+```
+
+|   A Tabela 7 resume tudo que foi visto acima, mostrando o número de parâmetros e o AIC de cada um dos modelos ajustados. O modelo com menor AIC é o modelo 5, que possui 5 parâmetros, mas o modelo 6 conseguiu se ajustar quase tão bem, mas com 1 parâmetro a menos.
+
+```{r tab_7}
+data.frame("Modelo" = c("SARIMAX 1", "SARIMAX 2", "SARIMAX 3", 
+                        "SARIMAX 4", "SARIMAX 5", "SARIMAX 6"),
+           
+           "Par." = c(length(fit_sarimax01[[1]][[1]][["fit"]][["par"]][["term"]]),
+                    length(fit_sarimax02[[1]][[1]][["fit"]][["par"]][["term"]]),
+                    length(fit_sarimax03[[1]][[1]][["fit"]][["par"]][["term"]]),
+                    length(fit_sarimax04[[1]][[1]][["fit"]][["par"]][["term"]]),
+                    length(fit_sarimax05[[1]][[1]][["fit"]][["par"]][["term"]]),
+                    length(fit_sarimax06[[1]][[1]][["fit"]][["par"]][["term"]])),
+           
+           "AIC" = c(fit_sarimax01[[1]][[1]][["fit"]][["fit"]][["AIC"]],
+                         fit_sarimax02[[1]][[1]][["fit"]][["fit"]][["AIC"]], 
+                         fit_sarimax03[[1]][[1]][["fit"]][["fit"]][["AIC"]],
+                         fit_sarimax04[[1]][[1]][["fit"]][["fit"]][["AIC"]],
+                         fit_sarimax05[[1]][[1]][["fit"]][["fit"]][["AIC"]],
+                         fit_sarimax06[[1]][[1]][["fit"]][["fit"]][["AIC"]])) %>%
+  kable(caption = "AIC e número de parâmetros por modelo", digits = 2)
+```
+
+|   Analisando os resíduos dos 3 modelos com menores AIC's, vemos na Figura 7 a tendência, autocorrelação e distribuição dos resíduos do SARIMAX 4, que indica que os resíduos são estacionários, sem possuir autocorrelação significativa entre seus lags, com distribuição centrada em 0 mas não muito próxima de uma normal, pois indica uma certa assimetria.
+
+```{r fig_7, fig.cap="Resíduos do SARIMAX 4", fig.dim=c(5,3), fig.pos="H"}
+fit_sarimax04 %>% gg_tsresiduals()
+```
+
+\newpage
+|   A Figura 8 mostra os mesmos gráficos para o SARIMAX 5, indicando estacionaridade dos resíduos, sem autocorrelação significativa aparente e com distribuição similar a anterior.
+
+```{r fig_8, fig.cap="Resíduos do SARIMAX 5", fig.dim=c(5,3), fig.pos="H"}
+fit_sarimax05 %>% gg_tsresiduals()
+```
+
+
+|   A Figura 9 também mostra os resíduos do ajuste SARIMAX 6, com características similares aos modelos anteriores, com um distribuição mais distante de uma normal.
+
+```{r fig_9, fig.cap="Resíduos do SARIMAX 6", fig.dim=c(5,3), fig.pos="H"}
+fit_sarimax06 %>% gg_tsresiduals()
+```
+
+
+|   Na Tabela 8 vemos os p-valores dos testes KPSS (que testa $H_0$: os resíduos são estacionários $vs. H_1$: os resíduos não são estacionários), Shapiro-Wilk (que testa $H_0$: os resíduos têm distribuição normal $vs. H_1$: os resíduos não têm distribuição normal), e Box-Pierce (que testa $H_0$: os resíduos são não-autocorrelacionados $vs. H_1$: os resíduos são autocorrelacionados). Com nível de significância de $5\%$, rejeitamos $H_0$ quando obtivermos um p-valor < 0,05. Como podemos ver, todos os modelos rejeitam normalidade dos resíduos, indicando que não capturaram bem a dinâmica dos dados.
+
+```{r tab_8}
+data.frame("Modelo" = c("SARIMAX 4", "SARIMAX 5", "SARIMAX 6"), 
+           
+           "KPSS" = c(kpss.test(augment(fit_sarimax04)$.innov)$p.value,
+                      kpss.test(augment(fit_sarimax05)$.innov)$p.value, 
+                      kpss.test(augment(fit_sarimax06)$.innov)$p.value), 
+           
+           "Shapiro-Wilk" = c(shapiro.test(augment(fit_sarimax04)$.innov)$p.value,
+                              shapiro.test(augment(fit_sarimax05)$.innov)$p.value,
+                              shapiro.test(augment(fit_sarimax06)$.innov)$p.value), 
+           
+           "Box-Pierce" = c(Box.test(augment(fit_sarimax04)$.innov, lag = 12, 
+                                     fitdf = 4)$p.value,
+                            Box.test(augment(fit_sarimax05)$.innov, lag = 12, 
+                                     fitdf = 5)$p.value, 
+                            Box.test(augment(fit_sarimax06)$.innov, lag = 12, 
+                                     fitdf = 4)$p.value)) %>% 
+  
+  kable(caption = "Testes estatísticos dos modelos", digits = 5)
+```
+
+
+|   Realizando validação cruzada para os 3 modelos, ou seja, separando so dados em treino ($80\%$) e teste ($20\%$) de maneira que é feita a previsão 1 passo a frente e depois retreinando o modelo repetidamente, até completar as observações, posteriormente é calculado o erro de predição comparado com valores observados. A Tabela 9 mostra a raíz do erro quadrático médio de cada um dos modelos, mostrando que o SARIMAX 5 foi o que teve a maior acurácia nas predições, se mostrando o mais adequado para ser colocado em produção. 
+
+```{r}
+validacao <- data.frame(".model" = c(), "data" = c(), ".mean" = c(), "erro" = c())
+
+for (i in (130 + 1):(nrow(dados_sem_na) - 1)) {
+  treino <- dados_sem_na[1:i,]
+  teste <- dados_sem_na[i+1,]
+  
+ modelos <-  treino %>% 
+   model(sarimax04 = ARIMA(abcr_leves ~ log(pmc_roupa_calcados) +
+                             pmc_combustiveis_lubrificantes + 
+                             pdq(0, 1, 1) + PDQ(0, 1, 1)), 
+         
+         sarimax05 = ARIMA(abcr_leves ~ log(pmc_roupa_calcados) +
+                             pmc_combustiveis_lubrificantes +
+                             reservas_internacionais +
+                             pdq(0, 1, 1) + PDQ(0, 1, 1)), 
+         
+         sarimax06 = ARIMA(abcr_leves ~ log(pmc_roupa_calcados) +
+                             log(pmc_combustiveis_lubrificantes) + 
+                             pdq(0, 1, 1) + PDQ(0, 1, 1)))
+   
+   forecast <- forecast(modelos, new_data = teste)
+   erro <- forecast$.mean - teste$abcr_leves
+   
+   validacao <- rbind(validacao, data.frame(forecast[,c(1,2,4)], erro))
+}  
+```
+
+```{r tab_9}
+validacao %>% 
+  group_by(.model) %>% 
+  summarise("RMSE" = sqrt(mean(erro^2))) %>% 
+  kable(caption = "RMSE das previsoes", col.names = c("Modelos", "RMSE"))
+```
+# Conclusões
+
+|   Dos modelos propostos anteriormente, o modelo SARIMAX 5, com as variáveis `log(pmc_roupa_calcados)`, `pmc_combustiveis_lubrificantes` e `reservas_internacionais`, com erros SARIMA(0,1,1)(0,1,1)[12] se mostrou o com maior acurácia dentro dos modelos mais simples, sendo o mais adequado para realizar predições. A Figura 10 mostra os valores preditos para ABCR dos próximos meses até 2030, junto com um intervalo de predição de $95\%$, para o cenário proposto das covariáveis do modelo.
+
+```{r fig_10, fig.cap="Predição do SARIMAX 5 até dez 2030",fig.dim=c(6,4), fig.pos="H"}
+predicao <- dados %>% filter(is.na(abcr_leves))
+
+fit_sarimax05 %>% 
+  forecast(new_data = predicao) %>% 
+  autoplot(dados_sem_na, level = 95) + 
+  xlab("Data") + ylab("ABCR") +
+  theme_classic()
+```
+
+\newpage
+|   A interpretação do modelo seria mais apropriada se os resíduos tivessem distribuição normal, mas podemos entender a relação de `abcr_leves` com as demais variáveis da seguinte maneira: 
+
+$$ 
+ABCR_t = 37,8 \times log(X_{1t}) + 0,44 \times X_{2t} + 34,2 \times log(X_{3t}) + \eta_t 
+$$
+
+em que $X_{1t}$ representa `pmc_roupa_calcados`, $X_{2t}$ representa `pmc_combustiveis_lubrificantes`, $X_{3t}$ representa `reservas_internacionais`, e $\eta_t$ são os erros SARIMA.
+
+|   Dessa forma, se aumentarmos o indicador referente ao comportamento do comércio de roupas e calçados em 1 unidade, é esperado que ABCR aumente em $0,378\%$, quando as outras variáveis são mantidas fixas. Se aumentarmos o indicador referente ao comportamento das vendas de combustíveis e lubrificantes em 1 unidade, é esperado que ABCR aumente em 0,44 unidades, quando as outras variáveis estão constantes. Finalmente, quando os ativos externos disponíveis do país aumentam em 1 unidade, é esperado um aumento de $0,342\%$ no índice ABCR para veículos leves.
